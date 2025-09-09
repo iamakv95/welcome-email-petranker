@@ -1,52 +1,58 @@
-// vercel-app/api/sendWelcomeBrevo.js
-// POST { email, name? }
-// Requires env: BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME
-import fetch from "node-fetch";
+// api/sendWelcomeBrevo.js
+// Vercel Serverless Function to send a welcome email via Brevo (Sendinblue).
+// Deployed under your Vercel project (e.g. https://verify-emails.vercel.app/api/sendWelcomeBrevo).
+//
+// Requirements:
+// - Set BREVO_API_KEY in your Vercel Project Settings → Environment Variables.
+// - Replace "noreply@yourapp.com" with your verified sender email in Brevo.
 
 export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
   try {
-    if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
-
     const { email, name } = req.body || {};
-    if (!email) return res.status(400).json({ ok: false, error: "Missing email" });
 
-    const BREVO_KEY = process.env.BREVO_API_KEY;
-    const SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL; // e.g. no-reply@yourdomain.com
-    const SENDER_NAME = process.env.BREVO_SENDER_NAME || "petRanker";
-
-    if (!BREVO_KEY || !SENDER_EMAIL) {
-      console.error("sendWelcomeBrevo: Missing Brevo env vars");
-      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    if (!email) {
+      return res.status(400).json({ error: "Missing email" });
     }
 
     const payload = {
-      sender: { name: SENDER_NAME, email: SENDER_EMAIL },
+      sender: { email: "noreply@yourapp.com", name: "PetRanker" },
       to: [{ email, name: name || "" }],
-      subject: "Welcome to petRanker — next steps",
-      htmlContent: `<p>Hi ${name || ""},</p>
-        <p>Welcome to <strong>petRanker</strong>! We sent you an email to verify your address — if it doesn't arrive, please check spam or click the verification link when it arrives.</p>
-        <p>If you need help, reply to this email.</p>
-        <p>— petRanker Team</p>`,
+      subject: "Welcome to PetRanker 🎉",
+      htmlContent: `
+        <h2>Hi ${name || "there"},</h2>
+        <p>Welcome to <b>PetRanker</b>! 🐾</p>
+        <p>You can now log in to your account and select your exam to start practicing.</p>
+        <br/>
+        <p>Good luck! 🚀</p>
+      `,
     };
 
-    const r = await fetch("https://api.brevo.com/v3/smtp/email", {
+    const resp = await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
+        "api-key": process.env.BREVO_API_KEY,
         "Content-Type": "application/json",
-        "api-key": BREVO_KEY,
+        accept: "application/json",
       },
       body: JSON.stringify(payload),
     });
 
-    const json = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      console.error("sendWelcomeBrevo: Brevo error", r.status, json);
-      return res.status(500).json({ ok: false, error: json || `Brevo error ${r.status}` });
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error("Brevo API error:", text);
+      return res.status(500).json({ error: text });
     }
 
-    return res.status(200).json({ ok: true, result: json });
+    const data = await resp.json();
+    console.log("Brevo send success:", data);
+
+    return res.status(200).json({ ok: true, data });
   } catch (err) {
-    console.error("sendWelcomeBrevo exception", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    console.error("sendWelcomeBrevo error:", err);
+    return res.status(500).json({ error: err.message || String(err) });
   }
 }
