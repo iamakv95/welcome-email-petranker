@@ -19,7 +19,7 @@ export default async function handler(req, res) {
     }
 
     const payload = {
-      sender: { email: "noreply@yourapp.com", name: "PetRanker" },
+      sender: { email: "admin@petranker.in", name: "PetRanker" },
       to: [{ email, name: name || "" }],
       subject: "Welcome to PetRanker 🎉",
       htmlContent: `
