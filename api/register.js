@@ -1,144 +1,216 @@
 // api/register.js
-// Server-side registration endpoint for secure auto-login.
-// Expects JSON body: { name, email, password }
-// Returns { ok: true, userId, secret } on success.
+// Server-side registration endpoint that works in both Vercel Edge and Node serverless runtimes.
+// Expects JSON POST body: { name, email, password }
 
 const APPWRITE_ENDPOINT = (process.env.APPWRITE_ENDPOINT || "").replace(/\/+$/, "").replace(/\/v1$/, "");
 const APPWRITE_PROJECT = process.env.APPWRITE_PROJECT || "";
 const APPWRITE_API_KEY = process.env.APPWRITE_API_KEY || "";
 const TOKEN_EXPIRE_SECONDS = parseInt(process.env.REGISTER_TOKEN_EXPIRE_SECONDS || "120", 10);
-const WELCOME_ENDPOINT = process.env.VERIFY_WELCOME_ENDPOINT || "https://verify-emails.vercel.app/api/welcome";
+const WELCOME_ENDPOINT = process.env.VERIFY_WELCOME_ENDPOINT || "";
 
-function json(status, body) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
+function makeJsonResponseNode(res, status = 200, body = {}) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
+function makeJsonResponseEdge(status = 200, body = {}) {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+// safe body parser that works for both node/edge
+async function parseBody(req, res) {
+  // Edge runtime: req is a Fetch Request with json()
+  if (typeof req.json === "function") {
+    return await req.json();
+  }
+
+  // Node serverless: express-like req,res pair. First check req.body (if already parsed by platform)
+  if (req.body) return req.body;
+
+  // Otherwise, read raw stream
+  return await new Promise((resolve, reject) => {
+    try {
+      let data = "";
+      req.setEncoding && req.setEncoding("utf8");
+      req.on("data", (chunk) => (data += chunk));
+      req.on("end", () => {
+        try {
+          if (!data) return resolve({});
+          resolve(JSON.parse(data));
+        } catch (e) {
+          resolve({});
+        }
+      });
+      req.on("error", reject);
+    } catch (e) {
+      resolve({});
+    }
   });
 }
 
-export default async function handler(req) {
+async function createAppwriteUser(email, password, name) {
+  const createUserUrl = `${APPWRITE_ENDPOINT}/v1/users`;
+  const resp = await fetch(createUserUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Appwrite-Project": APPWRITE_PROJECT,
+      "X-Appwrite-Key": APPWRITE_API_KEY,
+    },
+    body: JSON.stringify({ email, password, name }),
+  });
+  const text = await resp.text().catch(() => "");
+  if (!resp.ok) {
+    return { ok: false, status: resp.status, text };
+  }
+  let parsed = {};
   try {
-    if (req.method !== "POST") return json(405, { ok: false, message: "Method not allowed" });
+    parsed = JSON.parse(text);
+  } catch (e) {
+    parsed = { $id: text };
+  }
+  return { ok: true, body: parsed };
+}
 
-    const body = await req.json().catch(() => ({}));
-    const { name = "", email = "", password = "" } = body;
+async function createAppwriteToken(userId) {
+  const tokenUrl = `${APPWRITE_ENDPOINT}/v1/users/${encodeURIComponent(userId)}/tokens`;
+  const resp = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Appwrite-Project": APPWRITE_PROJECT,
+      "X-Appwrite-Key": APPWRITE_API_KEY,
+    },
+    body: JSON.stringify({ expire: TOKEN_EXPIRE_SECONDS }),
+  });
+  const text = await resp.text().catch(() => "");
+  if (!resp.ok) {
+    return { ok: false, status: resp.status, text };
+  }
+  try {
+    return { ok: true, body: JSON.parse(text) };
+  } catch (e) {
+    return { ok: true, body: { raw: text } };
+  }
+}
 
-    if (!email || !password) return json(400, { ok: false, message: "email and password required" });
+async function fireWelcomeAsync(email, name, userId) {
+  if (!WELCOME_ENDPOINT) return;
+  try {
+    await fetch(WELCOME_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, name, userId }),
+    });
+  } catch (e) {
+    // swallow
+    console.warn("welcome fire failed", e);
+  }
+}
+
+/**
+ * Handler exported in a way that works for Vercel Node serverless (req,res)
+ * and Edge (Request -> Response).
+ */
+export default async function handler(reqOrReq, maybeRes) {
+  // Detect Edge runtime: a single Request object passed (no second param)
+  const isEdge = typeof maybeRes === "undefined";
+
+  // Node serverless: handler(req, res)
+  if (!isEdge) {
+    const req = reqOrReq;
+    const res = maybeRes;
+    try {
+      if (req.method !== "POST") return makeJsonResponseNode(res, 405, { ok: false, message: "Method not allowed" });
+
+      const body = await parseBody(req, res);
+      const { name = "", email = "", password = "" } = body || {};
+
+      if (!email || !password) return makeJsonResponseNode(res, 400, { ok: false, message: "email and password required" });
+
+      if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT || !APPWRITE_API_KEY) {
+        return makeJsonResponseNode(res, 500, { ok: false, message: "Server not configured (missing APPWRITE envs)" });
+      }
+
+      // Basic validation
+      if (typeof email !== "string" || !email.includes("@")) {
+        return makeJsonResponseNode(res, 400, { ok: false, message: "Invalid email" });
+      }
+
+      // Create user
+      const created = await createAppwriteUser(email, password, name);
+      if (!created.ok) {
+        return makeJsonResponseNode(res, created.status || 500, { ok: false, message: "Appwrite create user failed", details: created.text || created.body });
+      }
+      const userId = created.body.$id || created.body.id || created.body.userId || created.body["$id"];
+      if (!userId) return makeJsonResponseNode(res, 500, { ok: false, message: "Appwrite did not return user id", details: created.body });
+
+      // Create token
+      const token = await createAppwriteToken(userId);
+      if (!token.ok) {
+        return makeJsonResponseNode(res, token.status || 500, { ok: false, message: "Appwrite token creation failed", details: token.text || token.body });
+      }
+
+      // Fire welcome email non-blocking
+      fireWelcomeAsync(email, name, userId);
+
+      return makeJsonResponseNode(res, 200, {
+        ok: true,
+        userId,
+        secret: token.body.secret,
+        expire: token.body.expire || TOKEN_EXPIRE_SECONDS,
+      });
+    } catch (err) {
+      console.error("api/register error", err);
+      return makeJsonResponseNode(res, 500, { ok: false, message: "server error", error: String(err) });
+    }
+  }
+
+  // Edge runtime: reqOrReq is a Request, we must return a Response
+  const req = reqOrReq;
+  try {
+    if (req.method !== "POST") return makeJsonResponseEdge(405, { ok: false, message: "Method not allowed" });
+
+    const body = await parseBody(req);
+    const { name = "", email = "", password = "" } = body || {};
+
+    if (!email || !password) return makeJsonResponseEdge(400, { ok: false, message: "email and password required" });
 
     if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT || !APPWRITE_API_KEY) {
-      return json(500, { ok: false, message: "Server not configured" });
+      return makeJsonResponseEdge(500, { ok: false, message: "Server not configured (missing APPWRITE envs)" });
     }
 
-    // (Optional) Basic abuse mitigation: block suspicious requests (very minimal)
-    // You should replace this with real captcha/rate-limit in production.
+    // Basic validation
     if (typeof email !== "string" || !email.includes("@")) {
-      return json(400, { ok: false, message: "Invalid email" });
+      return makeJsonResponseEdge(400, { ok: false, message: "Invalid email" });
     }
 
-    // 1) Create user (admin)
-    // API: POST /v1/users
-    const createUserUrl = `${APPWRITE_ENDPOINT}/v1/users`;
-    const createResp = await fetch(createUserUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Appwrite-Project": APPWRITE_PROJECT,
-        "X-Appwrite-Key": APPWRITE_API_KEY,
-      },
-      body: JSON.stringify({
-        userId: "unique()", // Appwrite supports "unique()" by SDKs; REST sometimes requires client id - fallback below
-        email,
-        password,
-        name,
-      }),
-    });
+    // Create user
+    const created = await createAppwriteUser(email, password, name);
+    if (!created.ok) {
+      return makeJsonResponseEdge(created.status || 500, { ok: false, message: "Appwrite create user failed", details: created.text || created.body });
+    }
+    const userId = created.body.$id || created.body.id || created.body.userId || created.body["$id"];
+    if (!userId) return makeJsonResponseEdge(500, { ok: false, message: "Appwrite did not return user id", details: created.body });
 
-    // Appwrite REST sometimes expects slightly different body; if 400 due to userId handle fallback:
-    let createBodyText = await createResp.text().catch(() => "");
-    let created = null;
-    if (createResp.ok) {
-      try {
-        created = JSON.parse(createBodyText);
-      } catch (e) {
-        created = { $id: createBodyText };
-      }
-    } else {
-      // If server complains about userId, try fallback: omit userId so Appwrite generates id
-      if (createResp.status === 400 || createResp.status === 409) {
-        const createResp2 = await fetch(createUserUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Appwrite-Project": APPWRITE_PROJECT,
-            "X-Appwrite-Key": APPWRITE_API_KEY,
-          },
-          body: JSON.stringify({ email, password, name }),
-        });
-        createBodyText = await createResp2.text().catch(() => "");
-        if (!createResp2.ok) {
-          return json(createResp2.status, { ok: false, message: "Appwrite create user failed", details: createBodyText });
-        }
-        try {
-          created = JSON.parse(createBodyText);
-        } catch (e) {
-          created = { $id: createBodyText };
-        }
-      } else {
-        return json(createResp.status, { ok: false, message: "Appwrite create user failed", details: createBodyText });
-      }
+    // Create token
+    const token = await createAppwriteToken(userId);
+    if (!token.ok) {
+      return makeJsonResponseEdge(token.status || 500, { ok: false, message: "Appwrite token creation failed", details: token.text || token.body });
     }
 
-    const userId = created.$id || created.$uid || created.id || created.userId || created["$id"] || null;
-    if (!userId) {
-      return json(500, { ok: false, message: "Appwrite did not return user id", details: created });
-    }
+    // Fire welcome email non-blocking
+    fireWelcomeAsync(email, name, userId);
 
-    // 2) Create short-lived token: POST /v1/users/{userId}/tokens
-    const tokenUrl = `${APPWRITE_ENDPOINT}/v1/users/${encodeURIComponent(userId)}/tokens`;
-    const tokenResp = await fetch(tokenUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Appwrite-Project": APPWRITE_PROJECT,
-        "X-Appwrite-Key": APPWRITE_API_KEY,
-      },
-      body: JSON.stringify({ expire: TOKEN_EXPIRE_SECONDS }),
-    });
-
-    const tokenText = await tokenResp.text().catch(() => "");
-    if (!tokenResp.ok) {
-      return json(tokenResp.status, { ok: false, message: "Appwrite token creation failed", details: tokenText });
-    }
-    let tokenBody = {};
-    try { tokenBody = JSON.parse(tokenText); } catch (e) { tokenBody = {}; }
-
-    if (!tokenBody.secret) {
-      return json(500, { ok: false, message: "Token secret missing", details: tokenBody });
-    }
-
-    // 3) Optionally trigger welcome email (non-blocking)
-    (async function fireWelcome() {
-      try {
-        await fetch(WELCOME_ENDPOINT, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, name, userId }),
-        });
-      } catch (e) {
-        // swallow; optional
-        console.warn("welcome fire failed", e);
-      }
-    })();
-
-    // 4) Return userId and secret to client
-    return json(200, {
+    return makeJsonResponseEdge(200, {
       ok: true,
       userId,
-      secret: tokenBody.secret,
-      expire: tokenBody.expire || TOKEN_EXPIRE_SECONDS,
+      secret: token.body.secret,
+      expire: token.body.expire || TOKEN_EXPIRE_SECONDS,
     });
   } catch (err) {
     console.error("api/register error", err);
-    return json(500, { ok: false, message: "server error", error: String(err) });
+    return makeJsonResponseEdge(500, { ok: false, message: "server error", error: String(err) });
   }
 }
