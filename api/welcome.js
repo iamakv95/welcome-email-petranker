@@ -1,14 +1,17 @@
-// api/welcome.js
+// api/welcome.js (corrected Brevo header)
+// Generates a signed token and sends welcome email via Brevo (Sendinblue).
+// IMPORTANT: Ensure env vars are set in Vercel:
+// - VERIFY_BASE (e.g. https://verify-emails.vercel.app)
+// - TOKEN_SECRET
+// - BREVO_API_KEY
+// - FROM_EMAIL
+
 import crypto from "crypto";
 
 const VERIFY_BASE = process.env.VERIFY_BASE;
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
-const FROM_EMAIL = process.env.FROM_EMAIL || "no-reply@yourdomain.com";
-const BREVO_API_KEY = process.env.BREVO_API_KEY; // Brevo (Sendinblue) API key
-
-if (!VERIFY_BASE) {
-  console.warn("VERIFY_BASE not set; please set VERIFY_BASE env var.");
-}
+const FROM_EMAIL = process.env.FROM_EMAIL || "admin@petranker.in";
+const BREVO_API_KEY = process.env.BREVO_API_KEY; // must be set in Vercel
 
 function base64UrlEncode(s) {
   return Buffer.from(s).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -37,7 +40,6 @@ function buildEmailHtml({ name, verifyUrl }) {
 
 async function sendBrevo(email, subject, html, name) {
   // Brevo (Sendinblue) transactional email API v3
-  // docs: https://developers.brevo.com/docs/send-a-transactional-email
   const endpoint = "https://api.brevo.com/v3/smtp/email";
   const payload = {
     sender: { email: FROM_EMAIL },
@@ -50,7 +52,8 @@ async function sendBrevo(email, subject, html, name) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `api-key ${BREVO_API_KEY}`,
+      // CORRECT header for Brevo:
+      "api-key": BREVO_API_KEY,
     },
     body: JSON.stringify(payload),
   });
@@ -69,8 +72,12 @@ async function sendBrevo(email, subject, html, name) {
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
     const { email, name, userId } = req.body || {};
     if (!email || !userId) return res.status(400).json({ error: "Missing email or userId" });
+
+    // DEBUG: temporary - log presence of BREVO_API_KEY (remove after verified)
+    console.log("DEBUG: BREVO_API_KEY present:", !!process.env.BREVO_API_KEY, "len:", process.env.BREVO_API_KEY ? process.env.BREVO_API_KEY.length : 0);
 
     // Build token: <b64User>.<expiresUnixMs>.<hmac>
     const b64User = base64UrlEncode(userId);
@@ -81,7 +88,7 @@ export default async function handler(req, res) {
 
     const verifyUrl = `${VERIFY_BASE}/api/verify?token=${encodeURIComponent(token)}`;
 
-    // If Brevo not configured, return devVerifyUrl for easy testing
+    // If Brevo not configured return dev link (handy for local dev)
     if (!BREVO_API_KEY) {
       return res.status(200).json({ ok: true, devVerifyUrl: verifyUrl });
     }
@@ -93,6 +100,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("welcome API error:", err);
+    // Return useful error info for debugging (but avoid leaking secrets)
     return res.status(500).json({ error: String(err?.message || err), details: err?.body || null });
   }
 }
