@@ -1,7 +1,7 @@
 // api/register.js
-// Server-side registration endpoint that works in both Vercel Edge and Node serverless runtimes.
-// Expects JSON POST body: { name, email, password }
-const crypto = require("crypto"); // top of file, if not already present
+// Works on both Vercel Node serverless and Edge runtimes.
+// Creates an Appwrite user (with a generated safe userId) and a short-lived token.
+
 const APPWRITE_ENDPOINT = (process.env.APPWRITE_ENDPOINT || "").replace(/\/+$/, "").replace(/\/v1$/, "");
 const APPWRITE_PROJECT = process.env.APPWRITE_PROJECT || "";
 const APPWRITE_API_KEY = process.env.APPWRITE_API_KEY || "";
@@ -13,91 +13,74 @@ function makeJsonResponseNode(res, status = 200, body = {}) {
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
-
 function makeJsonResponseEdge(status = 200, body = {}) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-// safe body parser that works for both node/edge
-async function parseBody(req, res) {
-  // Edge runtime: req is a Fetch Request with json()
-  if (typeof req.json === "function") {
-    return await req.json();
+// Pocket UUID v4 generator (works in all JS runtimes)
+function generateUuidV4() {
+  // If crypto.randomUUID is available (browser/edge/node), use it
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  } catch (e) {
+    // ignore
   }
-
-  // Node serverless: express-like req,res pair. First check req.body (if already parsed by platform)
-  if (req.body) return req.body;
-
-  // Otherwise, read raw stream
-  return await new Promise((resolve, reject) => {
-    try {
-      let data = "";
-      req.setEncoding && req.setEncoding("utf8");
-      req.on("data", (chunk) => (data += chunk));
-      req.on("end", () => {
-        try {
-          if (!data) return resolve({});
-          resolve(JSON.parse(data));
-        } catch (e) {
-          resolve({});
-        }
-      });
-      req.on("error", reject);
-    } catch (e) {
-      resolve({});
-    }
+  // Otherwise fallback to RFC4122 v4 generator (safe)
+  // eslint-disable-next-line no-bitwise
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    // eslint-disable-next-line no-bitwise
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
   });
 }
 
-// replace existing createAppwriteUser with this version
+// universal body parser for Node/Edge
+async function parseBody(req, res) {
+  if (typeof req.json === "function") return await req.json();
+  if (req.body) return req.body;
+  return await new Promise((resolve) => {
+    let data = "";
+    req.setEncoding && req.setEncoding("utf8");
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      try {
+        if (!data) return resolve({});
+        resolve(JSON.parse(data));
+      } catch (e) {
+        resolve({});
+      }
+    });
+    req.on("error", () => resolve({}));
+  });
+}
 
-async function createAppwriteUser(email, password, name) {
-  const createUserUrl = `${APPWRITE_ENDPOINT}/v1/users`;
-
-  // generate a safe userId (UUID v4) — allowed characters and length (36)
-  const userId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
-
+async function callAppwriteCreateUser(userId, email, password, name) {
+  const url = `${APPWRITE_ENDPOINT}/v1/users`;
   const payload = { userId, email, password, name };
-
-  const resp = await fetch(createUserUrl, {
+  const resp = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Appwrite-Project": APPWRITE_PROJECT,
-      "X-Appwrite-Key": APPWRITE_API_KEY,
-    },
+    headers: { "Content-Type": "application/json", "X-Appwrite-Project": APPWRITE_PROJECT, "X-Appwrite-Key": APPWRITE_API_KEY },
     body: JSON.stringify(payload),
   });
-
   const text = await resp.text().catch(() => "");
-  if (!resp.ok) {
-    return { ok: false, status: resp.status, text };
-  }
-  let parsed = {};
+  if (!resp.ok) return { ok: false, status: resp.status, text };
   try {
-    parsed = JSON.parse(text);
+    return { ok: true, body: JSON.parse(text) };
   } catch (e) {
-    parsed = { $id: text };
+    return { ok: true, body: { $id: text } };
   }
-  return { ok: true, body: parsed };
 }
 
-
-async function createAppwriteToken(userId) {
-  const tokenUrl = `${APPWRITE_ENDPOINT}/v1/users/${encodeURIComponent(userId)}/tokens`;
-  const resp = await fetch(tokenUrl, {
+async function callAppwriteCreateToken(userId) {
+  const url = `${APPWRITE_ENDPOINT}/v1/users/${encodeURIComponent(userId)}/tokens`;
+  const resp = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Appwrite-Project": APPWRITE_PROJECT,
-      "X-Appwrite-Key": APPWRITE_API_KEY,
-    },
+    headers: { "Content-Type": "application/json", "X-Appwrite-Project": APPWRITE_PROJECT, "X-Appwrite-Key": APPWRITE_API_KEY },
     body: JSON.stringify({ expire: TOKEN_EXPIRE_SECONDS }),
   });
   const text = await resp.text().catch(() => "");
-  if (!resp.ok) {
-    return { ok: false, status: resp.status, text };
-  }
+  if (!resp.ok) return { ok: false, status: resp.status, text };
   try {
     return { ok: true, body: JSON.parse(text) };
   } catch (e) {
@@ -105,7 +88,7 @@ async function createAppwriteToken(userId) {
   }
 }
 
-async function fireWelcomeAsync(email, name, userId) {
+async function fireWelcome(email, name, userId) {
   if (!WELCOME_ENDPOINT) return;
   try {
     await fetch(WELCOME_ENDPOINT, {
@@ -115,19 +98,14 @@ async function fireWelcomeAsync(email, name, userId) {
     });
   } catch (e) {
     // swallow
-    console.warn("welcome fire failed", e);
+    console.warn("welcome send failed", e);
   }
 }
 
-/**
- * Handler exported in a way that works for Vercel Node serverless (req,res)
- * and Edge (Request -> Response).
- */
 export default async function handler(reqOrReq, maybeRes) {
-  // Detect Edge runtime: a single Request object passed (no second param)
   const isEdge = typeof maybeRes === "undefined";
 
-  // Node serverless: handler(req, res)
+  // Node serverless (req,res)
   if (!isEdge) {
     const req = reqOrReq;
     const res = maybeRes;
@@ -143,41 +121,38 @@ export default async function handler(reqOrReq, maybeRes) {
         return makeJsonResponseNode(res, 500, { ok: false, message: "Server not configured (missing APPWRITE envs)" });
       }
 
-      // Basic validation
+      // basic validation
       if (typeof email !== "string" || !email.includes("@")) {
         return makeJsonResponseNode(res, 400, { ok: false, message: "Invalid email" });
       }
 
-      // Create user
-      const created = await createAppwriteUser(email, password, name);
-      if (!created.ok) {
-        return makeJsonResponseNode(res, created.status || 500, { ok: false, message: "Appwrite create user failed", details: created.text || created.body });
-      }
-      const userId = created.body.$id || created.body.id || created.body.userId || created.body["$id"];
-      if (!userId) return makeJsonResponseNode(res, 500, { ok: false, message: "Appwrite did not return user id", details: created.body });
+      // generate safe user id
+      const userId = generateUuidV4();
 
-      // Create token
-      const token = await createAppwriteToken(userId);
+      // create user
+      const created = await callAppwriteCreateUser(userId, email, password, name);
+      if (!created.ok) {
+        // forward Appwrite details for debugging
+        return makeJsonResponseNode(res, created.status || 400, { ok: false, message: "Appwrite create user failed", details: created.text || created.body });
+      }
+
+      // create token
+      const token = await callAppwriteCreateToken(userId);
       if (!token.ok) {
         return makeJsonResponseNode(res, token.status || 500, { ok: false, message: "Appwrite token creation failed", details: token.text || token.body });
       }
 
-      // Fire welcome email non-blocking
-      fireWelcomeAsync(email, name, userId);
+      // fire welcome async
+      fireWelcome(email, name, userId);
 
-      return makeJsonResponseNode(res, 200, {
-        ok: true,
-        userId,
-        secret: token.body.secret,
-        expire: token.body.expire || TOKEN_EXPIRE_SECONDS,
-      });
+      return makeJsonResponseNode(res, 200, { ok: true, userId, secret: token.body.secret, expire: token.body.expire || TOKEN_EXPIRE_SECONDS });
     } catch (err) {
-      console.error("api/register error", err);
+      console.error("api/register error node:", err);
       return makeJsonResponseNode(res, 500, { ok: false, message: "server error", error: String(err) });
     }
   }
 
-  // Edge runtime: reqOrReq is a Request, we must return a Response
+  // Edge runtime (Request -> Response)
   const req = reqOrReq;
   try {
     if (req.method !== "POST") return makeJsonResponseEdge(405, { ok: false, message: "Method not allowed" });
@@ -191,36 +166,23 @@ export default async function handler(reqOrReq, maybeRes) {
       return makeJsonResponseEdge(500, { ok: false, message: "Server not configured (missing APPWRITE envs)" });
     }
 
-    // Basic validation
     if (typeof email !== "string" || !email.includes("@")) {
       return makeJsonResponseEdge(400, { ok: false, message: "Invalid email" });
     }
 
-    // Create user
-    const created = await createAppwriteUser(email, password, name);
+    const userId = generateUuidV4();
+    const created = await callAppwriteCreateUser(userId, email, password, name);
     if (!created.ok) {
-      return makeJsonResponseEdge(created.status || 500, { ok: false, message: "Appwrite create user failed", details: created.text || created.body });
+      return makeJsonResponseEdge(created.status || 400, { ok: false, message: "Appwrite create user failed", details: created.text || created.body });
     }
-    const userId = created.body.$id || created.body.id || created.body.userId || created.body["$id"];
-    if (!userId) return makeJsonResponseEdge(500, { ok: false, message: "Appwrite did not return user id", details: created.body });
-
-    // Create token
-    const token = await createAppwriteToken(userId);
+    const token = await callAppwriteCreateToken(userId);
     if (!token.ok) {
       return makeJsonResponseEdge(token.status || 500, { ok: false, message: "Appwrite token creation failed", details: token.text || token.body });
     }
-
-    // Fire welcome email non-blocking
-    fireWelcomeAsync(email, name, userId);
-
-    return makeJsonResponseEdge(200, {
-      ok: true,
-      userId,
-      secret: token.body.secret,
-      expire: token.body.expire || TOKEN_EXPIRE_SECONDS,
-    });
+    fireWelcome(email, name, userId);
+    return makeJsonResponseEdge(200, { ok: true, userId, secret: token.body.secret, expire: token.body.expire || TOKEN_EXPIRE_SECONDS });
   } catch (err) {
-    console.error("api/register error", err);
+    console.error("api/register error edge:", err);
     return makeJsonResponseEdge(500, { ok: false, message: "server error", error: String(err) });
   }
 }
