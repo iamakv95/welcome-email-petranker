@@ -25,13 +25,13 @@ function buildEmailHtml({ name, verifyUrl }) {
   const plainName = name || "friend";
   return `
     <div style="font-family: system-ui, -apple-system, Roboto, Arial; color:#222;">
-      <h2 style="color:#015055">Bravo — welcome!</h2>
+      <h2 style="color:#015055">PET Ranker — welcome!</h2>
       <p>Hi ${plainName},</p>
       <p>We’ve set everything up early — click the button below to verify your email and complete setup:</p>
       <p style="margin:20px 0;">
         <a href="${verifyUrl}" style="display:inline-block;padding:10px 16px;background:#015055;color:#fff;border-radius:6px;text-decoration:none;">Verify email</a>
       </p>
-      <p style="font-size:13px;color:#666">If the button doesn't work, paste this link into your browser:<br/><a href="${verifyUrl}">${verifyUrl}</a></p>
+      <p style="font-size:13px;color:#666">If the button doesn't work, paste this link into your browser: <a href="${verifyUrl}" style="color: #015055">verify email</a></p>
       <hr style="border:none;border-top:1px solid #eee;margin:18px 0;" />
       <p style="font-size:13px;color:#777">If you didn't sign up, please ignore this email.</p>
     </div>
