@@ -9,6 +9,8 @@ const BREVO_API_KEY = process.env.BREVO_API_KEY; // Brevo (Sendinblue) API key
 if (!VERIFY_BASE) {
   console.warn("VERIFY_BASE not set; please set VERIFY_BASE env var.");
 }
+// DEBUG — temporary: log presence and length (do NOT log full key)
+console.log("DEBUG: BREVO_API_KEY present:", !!process.env.BREVO_API_KEY, "len:", process.env.BREVO_API_KEY ? process.env.BREVO_API_KEY.length : 0);
 
 function base64UrlEncode(s) {
   return Buffer.from(s).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
