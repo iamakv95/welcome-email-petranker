@@ -1,7 +1,7 @@
 // api/register.js
 // Server-side registration endpoint that works in both Vercel Edge and Node serverless runtimes.
 // Expects JSON POST body: { name, email, password }
-
+const crypto = require("crypto"); // top of file, if not already present
 const APPWRITE_ENDPOINT = (process.env.APPWRITE_ENDPOINT || "").replace(/\/+$/, "").replace(/\/v1$/, "");
 const APPWRITE_PROJECT = process.env.APPWRITE_PROJECT || "";
 const APPWRITE_API_KEY = process.env.APPWRITE_API_KEY || "";
@@ -49,8 +49,16 @@ async function parseBody(req, res) {
   });
 }
 
+// replace existing createAppwriteUser with this version
+
 async function createAppwriteUser(email, password, name) {
   const createUserUrl = `${APPWRITE_ENDPOINT}/v1/users`;
+
+  // generate a safe userId (UUID v4) — allowed characters and length (36)
+  const userId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
+
+  const payload = { userId, email, password, name };
+
   const resp = await fetch(createUserUrl, {
     method: "POST",
     headers: {
@@ -58,8 +66,9 @@ async function createAppwriteUser(email, password, name) {
       "X-Appwrite-Project": APPWRITE_PROJECT,
       "X-Appwrite-Key": APPWRITE_API_KEY,
     },
-    body: JSON.stringify({ email, password, name }),
+    body: JSON.stringify(payload),
   });
+
   const text = await resp.text().catch(() => "");
   if (!resp.ok) {
     return { ok: false, status: resp.status, text };
@@ -72,6 +81,7 @@ async function createAppwriteUser(email, password, name) {
   }
   return { ok: true, body: parsed };
 }
+
 
 async function createAppwriteToken(userId) {
   const tokenUrl = `${APPWRITE_ENDPOINT}/v1/users/${encodeURIComponent(userId)}/tokens`;
