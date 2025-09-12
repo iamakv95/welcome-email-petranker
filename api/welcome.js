@@ -76,9 +76,7 @@ export default async function handler(req, res) {
     const { email, name, userId } = req.body || {};
     if (!email || !userId) return res.status(400).json({ error: "Missing email or userId" });
 
-    // DEBUG: temporary - log presence of BREVO_API_KEY (remove after verified)
-    console.log("DEBUG: BREVO_API_KEY present:", !!process.env.BREVO_API_KEY, "len:", process.env.BREVO_API_KEY ? process.env.BREVO_API_KEY.length : 0);
-
+  
     // Build token: <b64User>.<expiresUnixMs>.<hmac>
     const b64User = base64UrlEncode(userId);
     const expires = Date.now() + 1000 * 60 * 60 * 24; // 24h
