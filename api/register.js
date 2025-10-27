@@ -10,6 +10,7 @@ const WELCOME_ENDPOINT = process.env.VERIFY_WELCOME_ENDPOINT || "";
 
 function makeJsonResponseNode(res, status = 200, body = {}) {
   res.statusCode = status;
+  
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
